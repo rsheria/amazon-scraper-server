@@ -540,6 +540,17 @@ app.get('/health', (req, res) => {
   res.json({ status: 'ok' });
 });
 
+// Root endpoint
+app.get('/', (req, res) => {
+  res.json({ 
+    message: 'Amazon Scraper API is running',
+    endpoints: {
+      health: '/health',
+      scraper: '/api/scrape'
+    }
+  });
+});
+
 // Start the server
 app.listen(PORT, () => {
   console.log(`Amazon scraper server running on port ${PORT}`);
