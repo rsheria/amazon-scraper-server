@@ -4,6 +4,7 @@
  */
 
 const express = require('express');
+const bodyParser = require('body-parser');
 const cors = require('cors');
 const axios = require('axios');
 const cheerio = require('cheerio');
@@ -13,8 +14,21 @@ const path = require('path');
 const app = express();
 const PORT = process.env.PORT || 3333;
 
+// Configure middleware
+app.use(bodyParser.json());
+
+// Configure CORS to allow requests from any origin in production
+app.use(cors({
+  origin: '*', // Allow all origins
+  methods: ['GET', 'POST', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Accept', 'Origin', 'Authorization'],
+  credentials: false
+}));
+
+// Handle preflight requests
+app.options('*', cors());
+
 // Middleware
-app.use(cors());
 app.use(express.json());
 
 // Serve static files from the public directory
@@ -707,72 +721,63 @@ function normalizeBookData(bookData) {
 
 // Create API endpoint for scraping
 app.post('/api/scrape', async (req, res) => {
-  // Set JSON content type and CORS headers for all responses
-  res.setHeader('Content-Type', 'application/json');
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  
   try {
+    console.log('Received scrape request:', req.body);
+    
     const { url } = req.body;
     
     if (!url) {
+      console.error('No URL provided in request');
       return res.status(400).json({ 
-        success: false,
-        error: 'URL is required' 
+        success: false, 
+        error: 'No URL provided' 
       });
     }
-    
-    if (isValidAmazonUrl(url)) {
-      try {
-        const bookData = await fetchBookDataFromAmazon(url);
-        
-        return res.status(200).json({
-          success: true,
-          bookData: bookData
-        });
-      } catch (scrapeError) {
-        console.error(`Detailed scraper error: ${scrapeError.message}`);
-        console.error(scrapeError.stack);
-        
-        // Send a more informative error response
-        return res.status(500).json({ 
-          success: false,
-          error: `Failed to scrape Amazon data: ${scrapeError.message}`,
-          details: scrapeError.stack
+
+    console.log(`Scraping URL: ${url}`);
+
+    try {
+      // Validate URL (imported from thaliaScraperUtils)
+      if (!isValidAmazonUrl(url) && !isValidThaliaUrl(url)) {
+        console.error('Invalid URL:', url);
+        return res.status(400).json({ 
+          success: false, 
+          error: 'Invalid URL' 
         });
       }
-    } else if (isValidThaliaUrl(url)) {
-      try {
-        const bookData = await scrapeThalia(url);
-        
-        return res.status(200).json({
-          success: true,
-          bookData: bookData
-        });
-      } catch (scrapeError) {
-        console.error(`Detailed scraper error: ${scrapeError.message}`);
-        console.error(scrapeError.stack);
-        
-        // Send a more informative error response
-        return res.status(500).json({ 
-          success: false,
-          error: `Failed to scrape Thalia data: ${scrapeError.message}`,
-          details: scrapeError.stack
-        });
+
+      // Scrape book data
+      let bookData;
+      if (isValidAmazonUrl(url)) {
+        bookData = await fetchBookDataFromAmazon(url);
+      } else if (isValidThaliaUrl(url)) {
+        bookData = await scrapeThalia(url);
       }
-    } else {
-      return res.status(400).json({ 
-        success: false,
-        error: 'Invalid URL. Please provide a valid Amazon.de or Thalia.de book URL.' 
+      
+      // Log successful response
+      console.log('Successfully scraped data:', JSON.stringify(bookData).substring(0, 200) + '...');
+      
+      // Return success response
+      return res.json({ 
+        success: true, 
+        bookData 
+      });
+    } catch (error) {
+      console.error('Error during scraping:', error.message);
+      
+      // Return error response
+      return res.status(500).json({ 
+        success: false, 
+        error: error.message || 'An error occurred during scraping' 
       });
     }
   } catch (error) {
-    console.error('API endpoint error:', error);
-    console.error(error.stack);
+    console.error('Unexpected server error:', error);
     
+    // Return error response for unexpected errors
     return res.status(500).json({ 
-      success: false,
-      error: error.message || 'Failed to process request',
-      stack: error.stack
+      success: false, 
+      error: 'Unexpected server error' 
     });
   }
 });
