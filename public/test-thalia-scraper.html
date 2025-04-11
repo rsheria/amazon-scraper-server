@@ -1,0 +1,199 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Thalia Scraper Test Tool</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            line-height: 1.6;
+        }
+        h1 {
+            color: #2c3e50;
+            margin-bottom: 20px;
+        }
+        input {
+            width: 100%;
+            padding: 10px;
+            margin-bottom: 10px;
+            box-sizing: border-box;
+        }
+        button {
+            background-color: #3498db;
+            color: white;
+            border: none;
+            padding: 10px 15px;
+            cursor: pointer;
+            font-size: 16px;
+        }
+        button:hover {
+            background-color: #2980b9;
+        }
+        #loading {
+            display: none;
+            margin: 20px 0;
+            color: #7f8c8d;
+        }
+        #result {
+            margin-top: 20px;
+            white-space: pre-wrap;
+            background-color: #f8f9fa;
+            padding: 15px;
+            border-radius: 5px;
+            border: 1px solid #ddd;
+            overflow-x: auto;
+        }
+        .book-preview {
+            display: flex;
+            margin-top: 20px;
+            border: 1px solid #ddd;
+            padding: 15px;
+            border-radius: 5px;
+        }
+        .book-cover {
+            flex: 0 0 150px;
+            margin-right: 20px;
+        }
+        .book-cover img {
+            max-width: 100%;
+            box-shadow: 0 4px 8px rgba(0,0,0,0.1);
+        }
+        .book-details {
+            flex: 1;
+        }
+        .error {
+            color: #e74c3c;
+            padding: 10px;
+            background-color: #fadbd8;
+            border-radius: 5px;
+            margin-top: 20px;
+        }
+        .sample-urls {
+            margin: 20px 0;
+            padding: 10px;
+            background-color: #eee;
+            border-radius: 5px;
+        }
+        .sample-urls p {
+            margin: 5px 0;
+            cursor: pointer;
+            color: #3498db;
+        }
+        .sample-urls p:hover {
+            text-decoration: underline;
+        }
+    </style>
+</head>
+<body>
+    <h1>Thalia Scraper Test Tool</h1>
+    <p>Enter a Thalia.de book URL to test the scraper:</p>
+    
+    <div>
+        <input type="text" id="thaliaUrl" placeholder="https://www.thalia.de/shop/home/artikeldetails/..." />
+        <button onclick="scrapeBook()">Scrape Book</button>
+    </div>
+    
+    <div class="sample-urls">
+        <strong>Sample URLs to try:</strong>
+        <p onclick="useUrl('https://www.thalia.de/shop/home/artikeldetails/A1063747240')">1. Die Mitternachtsbibliothek - Matt Haig</p>
+        <p onclick="useUrl('https://www.thalia.de/shop/home/artikeldetails/A1059476864')">2. Ein zusätzlicher Schritt - Friso Gentsch</p>
+        <p onclick="useUrl('https://www.thalia.de/shop/home/artikeldetails/A1062402242')">3. Das Kind in dir muss Heimat finden - Stefanie Stahl</p>
+    </div>
+    
+    <div id="loading">Loading book data... This may take up to 30 seconds...</div>
+    
+    <div id="bookPreview" class="book-preview" style="display: none;">
+        <div class="book-cover">
+            <img id="coverImg" src="" alt="Book cover">
+        </div>
+        <div class="book-details">
+            <h2 id="bookTitle"></h2>
+            <p><strong>Author:</strong> <span id="bookAuthor"></span></p>
+            <p><strong>Description:</strong> <span id="bookDescription"></span></p>
+            <p><strong>Language:</strong> <span id="bookLanguage"></span></p>
+            <p><strong>ISBN:</strong> <span id="bookIsbn"></span></p>
+            <p><strong>Publisher:</strong> <span id="bookPublisher"></span></p>
+            <p><strong>Published Date:</strong> <span id="bookPublishedDate"></span></p>
+        </div>
+    </div>
+    
+    <div id="error" class="error" style="display: none;"></div>
+    
+    <h3>Raw Response:</h3>
+    <pre id="result">No results yet</pre>
+
+    <script>
+        function useUrl(url) {
+            document.getElementById('thaliaUrl').value = url;
+        }
+        
+        async function scrapeBook() {
+            const url = document.getElementById('thaliaUrl').value.trim();
+            if (!url || !url.includes('thalia.de')) {
+                showError('Please enter a valid Thalia.de URL');
+                return;
+            }
+            
+            document.getElementById('loading').style.display = 'block';
+            document.getElementById('result').innerText = 'Fetching data...';
+            document.getElementById('bookPreview').style.display = 'none';
+            document.getElementById('error').style.display = 'none';
+            
+            try {
+                // Use the server-side endpoint on Render.com
+                const apiUrl = 'https://amazon-scraper-server-1.onrender.com/api/scrape-thalia';
+                
+                const response = await fetch(apiUrl, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({ url }),
+                });
+                
+                const rawResponse = await response.text();
+                
+                try {
+                    const data = JSON.parse(rawResponse);
+                    document.getElementById('result').innerText = JSON.stringify(data, null, 2);
+                    
+                    if (data.success && data.bookData) {
+                        displayBookPreview(data.bookData);
+                    } else {
+                        showError('API response indicated an error');
+                    }
+                } catch (parseError) {
+                    document.getElementById('result').innerText = rawResponse;
+                    showError('Failed to parse API response: ' + parseError.message);
+                }
+            } catch (error) {
+                showError('Error calling the API: ' + error.message);
+            } finally {
+                document.getElementById('loading').style.display = 'none';
+            }
+        }
+        
+        function displayBookPreview(bookData) {
+            document.getElementById('bookPreview').style.display = 'flex';
+            document.getElementById('coverImg').src = bookData.coverUrl || 'https://via.placeholder.com/150x225?text=No+Cover';
+            document.getElementById('bookTitle').innerText = bookData.title || 'Unknown Title';
+            document.getElementById('bookAuthor').innerText = bookData.author || 'Unknown Author';
+            document.getElementById('bookDescription').innerText = bookData.description || 'No description available';
+            document.getElementById('bookLanguage').innerText = bookData.language || 'Unknown';
+            document.getElementById('bookIsbn').innerText = bookData.isbn || 'N/A';
+            document.getElementById('bookPublisher').innerText = bookData.publisher || 'Unknown';
+            document.getElementById('bookPublishedDate').innerText = bookData.publicationDate || 'Unknown';
+        }
+        
+        function showError(message) {
+            const errorElement = document.getElementById('error');
+            errorElement.innerText = message;
+            errorElement.style.display = 'block';
+        }
+    </script>
+</body>
+</html>
