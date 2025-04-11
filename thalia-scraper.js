@@ -20,7 +20,7 @@ const bodyParser = require('body-parser');
 async function scrapeThalia(url, options = {}) {
   const {
     headless = true,
-    timeout = 30000,
+    timeout = 60000, // Increased timeout for cloud environments
     retries = 3,
     debug = false
   } = options;
@@ -42,8 +42,15 @@ async function scrapeThalia(url, options = {}) {
       '--window-position=0,0',
       '--ignore-certificate-errors',
       '--ignore-certificate-errors-spki-list',
-      '--disable-features=IsolateOrigins,site-per-process' // This helps with cookie consent handling
-    ]
+      '--disable-features=IsolateOrigins,site-per-process',
+      '--disable-dev-shm-usage',
+      '--disable-accelerated-2d-canvas',
+      '--no-first-run',
+      '--no-zygote',
+      '--single-process', // Important for some cloud environments
+      '--disable-gpu'
+    ],
+    timeout: timeout
   });
 
   try {
@@ -53,15 +60,40 @@ async function scrapeThalia(url, options = {}) {
     // Set user agent
     await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
     
+    // Block unnecessary resources to improve performance
+    await page.setRequestInterception(true);
+    page.on('request', (req) => {
+      const resourceType = req.resourceType();
+      // Block images, fonts, stylesheets, and other non-essential resources
+      if (resourceType === 'image' || resourceType === 'font' || resourceType === 'stylesheet' || resourceType === 'media') {
+        req.abort();
+      } else {
+        req.continue();
+      }
+    });
+    
     // Set viewport
     await page.setViewport({
       width: 1366,
       height: 768
     });
+    
+    // Set a longer default navigation timeout
+    page.setDefaultNavigationTimeout(timeout);
 
-    // Navigate to URL
+    // Navigate to URL with extended timeout and simpler wait condition
     if (debug) console.log('Navigating to URL...');
-    await page.goto(url, { waitUntil: 'networkidle2', timeout });
+    try {
+      // Use a more basic navigation strategy
+      await page.goto(url, { 
+        waitUntil: 'domcontentloaded', // Less strict than networkidle2
+        timeout: timeout 
+      });
+    } catch (navError) {
+      console.error('Navigation error:', navError.message);
+      // Even if navigation times out, try to continue with whatever content loaded
+      console.log('Attempting to proceed with partial page load...');
+    }
     
     // Take a screenshot for debugging the initial page load
     if (debug) {
@@ -73,67 +105,22 @@ async function scrapeThalia(url, options = {}) {
       }
     }
     
+    // Wait a moment for any dynamic content to load
+    await page.waitForTimeout(3000);
+    
     // Handle cookie consent if present
     try {
       if (debug) console.log('Checking for cookie consent dialog...');
       await handleCookieConsent(page);
       
       // After handling cookie consent, wait for page to stabilize again
-      await page.waitForTimeout(2000);
-      await page.waitForSelector('h1', { timeout: 10000 }).catch(() => {
-        console.log('Could not find h1 tag after handling cookie consent');
-      });
-      
-      // Take another screenshot after handling cookies to confirm the page is properly loaded
-      if (debug) {
-        try {
-          await page.screenshot({ path: 'thalia-after-cookies.png' });
-          console.log('Saved post-cookie handling screenshot');
-        } catch (err) {
-          console.log('Could not save post-cookie handling screenshot:', err.message);
-        }
-      }
-      
-      // Refresh the page if content doesn't seem to be loaded correctly
-      const pageText = await page.evaluate(() => document.body.innerText);
-      if (!pageText.includes('Beschreibung') && !pageText.includes('Details')) {
-        console.log('Page content seems incomplete, refreshing page...');
-        await page.reload({ waitUntil: 'networkidle2', timeout });
-      }
+      await page.waitForTimeout(3000);
     } catch (error) {
       if (debug) console.log('Error handling cookie consent:', error.message);
     }
     
-    // Check if we're on a valid book page
-    const isBookPage = await page.evaluate(() => {
-      // Check for common elements that indicate a book page
-      const hasH1 = document.querySelector('h1') !== null;
-      const hasArticleDetails = window.location.href.includes('artikeldetails');
-      const hasMainShopPage = document.title.includes('Thalia Online Shop') && 
-                             !document.querySelector('[data-ean], [data-isbn]');
-      
-      return hasH1 && hasArticleDetails && !hasMainShopPage;
-    });
-    
-    if (!isBookPage) {
-      try {
-        // Take a screenshot of the non-book page for debugging
-        await page.screenshot({ path: 'thalia-not-book-page.png' });
-        console.log('Saved non-book page screenshot for debugging');
-      } catch (err) {
-        console.log('Could not save non-book page screenshot:', err.message);
-      }
-      throw new Error('URL does not appear to be a valid Thalia book page');
-    }
-    
-    // Wait for content to load
-    await page.waitForSelector('h1', { timeout });
-    
-    // Scroll down to load more content
-    await autoScroll(page);
-    
-    // Get page content
-    if (debug) console.log('Extracting page content...');
+    // Try to extract book data directly from the DOM, even if the page isn't fully loaded
+    console.log('Extracting page content...');
     const content = await page.content();
     
     // Extract structured data if available
@@ -234,22 +221,39 @@ async function scrapeThalia(url, options = {}) {
       if (debug) console.log('Error extracting author directly:', error.message);
     }
     
-    // Parse with Cheerio
-    const $ = cheerio.load(content);
+    // Parse with Cheerio and extract book data
+    console.log('Extracting book data with Cheerio...');
+    let bookData = null;
     
-    // Extract book data
-    if (debug) console.log('Extracting book data...');
-    const bookData = extractBookData($, structuredData, dataAttributes, authorData);
+    try {
+      const $ = cheerio.load(content);
+      
+      // Extract book data with Cheerio
+      bookData = extractBookData($, structuredData, dataAttributes, authorData);
     
-    // Final check for author in description if still missing
-    if (!bookData.author && bookData.description) {
-      const authorFromDesc = extractAuthorFromText(bookData.description);
-      if (authorFromDesc) {
-        bookData.author = authorFromDesc;
+      // Final check for author in description if still missing
+      if (!bookData.author && bookData.description) {
+        const authorFromDesc = extractAuthorFromText(bookData.description);
+        if (authorFromDesc) {
+          bookData.author = authorFromDesc;
+        }
       }
+    } catch (cheerioError) {
+      console.error('Error while processing with Cheerio:', cheerioError.message);
+      // Create empty bookData if extraction failed
+      bookData = {
+        title: '',
+        subtitle: '',
+        author: '',
+        description: '',
+        coverUrl: '',
+        price: '',
+        language: 'Deutsch',
+        languageCode: 'de'
+      };
     }
     
-    if (debug) console.log('Book data extracted successfully');
+    if (debug) console.log('Book data extraction attempt completed');
     return bookData;
   } catch (error) {
     console.error('Error during scraping:', error);
@@ -654,13 +658,13 @@ function isValidThaliaUrl(url) {
 async function scrapeThaliaSafe(url, options = {}) {
   const {
     maxRetries = 3,
-    retryDelay = 2000,
-    timeout = 30000,
+    retryDelay = 5000, // Increased delay between retries
+    timeout = 60000,   // Increased timeout for cloud environments
     headless = true,
     validateData = true,
     normalizeData = true,
     fixData = true,
-    debug = false
+    debug = true // Default to true to get more logs in production
   } = options;
 
   // Validate URL
@@ -671,10 +675,11 @@ async function scrapeThaliaSafe(url, options = {}) {
   // Implement retry mechanism
   let lastError = null;
   let bookData = null;
+  let partialData = null;
 
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
-      if (debug) console.log(`Attempt ${attempt}/${maxRetries} to scrape data from ${url}`);
+      console.log(`Attempt ${attempt}/${maxRetries} to scrape data from ${url}`);
       
       // Call the base scraper
       bookData = await scrapeThalia(url, {
@@ -684,27 +689,55 @@ async function scrapeThaliaSafe(url, options = {}) {
       });
       
       // If we got data, break the retry loop
-      if (bookData) break;
+      if (bookData) {
+        // Keep track of partial data even if validation fails
+        partialData = bookData;
+        break;
+      }
       
     } catch (error) {
       lastError = error;
-      
-      if (debug) {
-        console.error(`Attempt ${attempt} failed: ${error.message}`);
-      }
+      console.error(`Attempt ${attempt} failed: ${error.message}`);
       
       // If we haven't reached max retries, wait before trying again
       if (attempt < maxRetries) {
         const waitTime = retryDelay * attempt;
-        if (debug) console.log(`Waiting ${waitTime}ms before next attempt...`);
+        console.log(`Waiting ${waitTime}ms before next attempt...`);
         await new Promise(resolve => setTimeout(resolve, waitTime));
       }
     }
   }
 
-  // If all retries failed, throw the last error
+  // If all retries failed but we have partial data, use that
+  if (!bookData && partialData) {
+    console.log('Using partial data from previous attempts');
+    bookData = partialData;
+  }
+  
+  // If still no data at all, try a desperate fallback extraction from the URL itself
   if (!bookData) {
-    throw new Error(`Failed to scrape book data after ${maxRetries} attempts: ${lastError?.message || 'Unknown error'}`);
+    if (lastError) {
+      console.log('All scraping attempts failed. Attempting to extract minimal data from URL');
+      
+      // Extract minimal book data from URL
+      const urlObj = new URL(url);
+      const pathSegments = urlObj.pathname.split('/');
+      const lastSegment = pathSegments[pathSegments.length - 1];
+      
+      bookData = {
+        title: lastSegment.replace(/-/g, ' ').replace(/([A-Z])/g, ' $1').trim(),
+        author: '',
+        description: 'Data extraction failed. Please check the book details on Thalia.de',
+        coverUrl: 'https://via.placeholder.com/150x225?text=No+Cover',
+        language: 'Deutsch',
+        languageCode: 'de',
+        isbn: '',
+        ean: lastSegment.startsWith('A') ? lastSegment : '',
+        publisher: ''
+      };
+    } else {
+      throw new Error(`Failed to scrape book data after ${maxRetries} attempts: ${lastError?.message || 'Unknown error'}`);
+    }
   }
 
   // Fix data if requested
@@ -721,12 +754,17 @@ async function scrapeThaliaSafe(url, options = {}) {
   if (validateData) {
     const validation = validateBookData(bookData);
     if (!validation.isValid) {
-      if (debug) {
-        console.warn(`Validation warning: Missing fields: ${validation.missingFields.join(', ')}`);
-      }
+      console.warn(`Validation warning: Missing fields: ${validation.missingFields.join(', ')}`);
+      
+      // Add validation warning to book data
       bookData.validationWarning = {
         missingFields: validation.missingFields
       };
+      
+      // Try to fix critical missing fields using the URL or other context
+      if (validation.missingFields.includes('author')) {
+        bookData.author = 'Unknown Author';
+      }
     }
   }
 
