@@ -2,10 +2,10 @@
   "name": "amazon-scraper-server",
   "version": "1.0.0",
   "description": "Server for scraping book data from Amazon and Thalia",
-  "main": "thalia-scraper.js",
+  "main": "amazon-scraper-simple.js",
   "scripts": {
-    "start": "node thalia-scraper.js",
-    "start:amazon": "node amazon-scraper-simple.js",
+    "start": "node amazon-scraper-simple.js",
+    "start:thalia": "node thalia-scraper.js",
     "dev": "nodemon amazon-scraper-simple.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
