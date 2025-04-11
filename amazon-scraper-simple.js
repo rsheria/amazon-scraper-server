@@ -277,15 +277,25 @@ async function fetchBookDataFromAmazon(url) {
 
 // Create API endpoint for scraping
 app.post('/api/scrape', async (req, res) => {
+  // Set JSON content type and CORS headers for all responses
+  res.setHeader('Content-Type', 'application/json');
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  
   try {
     const { url } = req.body;
     
     if (!url) {
-      return res.status(400).json({ error: 'URL is required' });
+      return res.status(400).json({ 
+        success: false,
+        error: 'URL is required' 
+      });
     }
     
     if (!isValidAmazonUrl(url)) {
-      return res.status(400).json({ error: 'Invalid Amazon URL' });
+      return res.status(400).json({ 
+        success: false,
+        error: 'Invalid Amazon URL' 
+      });
     }
     
     console.log(`Scraping book data from ${url}`);
@@ -293,7 +303,7 @@ app.post('/api/scrape', async (req, res) => {
     try {
       const bookData = await fetchBookDataFromAmazon(url);
       
-      return res.json({
+      return res.status(200).json({
         success: true,
         bookData: bookData
       });
@@ -303,6 +313,7 @@ app.post('/api/scrape', async (req, res) => {
       
       // Send a more informative error response
       return res.status(500).json({ 
+        success: false,
         error: `Failed to scrape Amazon data: ${scrapeError.message}`,
         details: scrapeError.stack
       });
@@ -310,7 +321,9 @@ app.post('/api/scrape', async (req, res) => {
   } catch (error) {
     console.error('API endpoint error:', error);
     console.error(error.stack);
+    
     return res.status(500).json({ 
+      success: false,
       error: error.message || 'Failed to process request',
       stack: error.stack
     });
