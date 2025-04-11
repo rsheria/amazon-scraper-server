@@ -7,6 +7,7 @@ const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
 const cheerio = require('cheerio');
+const path = require('path');
 
 const app = express();
 const PORT = process.env.PORT || 3333;
@@ -18,6 +19,9 @@ app.use(cors({
   credentials: false
 }));
 app.use(express.json());
+
+// Serve static files from the public directory
+app.use(express.static(path.join(__dirname, 'public')));
 
 /**
  * Validates if the provided URL is a valid Amazon.de book URL
