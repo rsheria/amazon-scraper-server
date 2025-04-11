@@ -161,7 +161,7 @@ async function fetchBookDataFromAmazon(url) {
       } else if (text.includes('Language') || text.includes('Sprache')) {
         bookData.language = text.split(':')[1].trim();
       } else if (text.includes('Print length') || text.includes('Seitenzahl')) {
-        const pageMatch = text.match(/\\d+/);
+        const pageMatch = text.match(/\d+/);
         if (pageMatch) {
           bookData.pageCount = pageMatch[0];
         }
@@ -200,6 +200,7 @@ async function fetchBookDataFromAmazon(url) {
     };
   } catch (error) {
     console.error(`Error fetching book data: ${error.message}`);
+    console.error(error.stack);
     throw error;
   }
 }
@@ -219,16 +220,29 @@ app.post('/api/scrape', async (req, res) => {
     
     console.log(`Scraping book data from ${url}`);
     
-    const bookData = await fetchBookDataFromAmazon(url);
-    
-    return res.json({
-      success: true,
-      bookData: bookData
-    });
+    try {
+      const bookData = await fetchBookDataFromAmazon(url);
+      
+      return res.json({
+        success: true,
+        bookData: bookData
+      });
+    } catch (scrapeError) {
+      console.error(`Detailed scraper error: ${scrapeError.message}`);
+      console.error(scrapeError.stack);
+      
+      // Send a more informative error response
+      return res.status(500).json({ 
+        error: `Failed to scrape Amazon data: ${scrapeError.message}`,
+        details: scrapeError.stack
+      });
+    }
   } catch (error) {
-    console.error('Scraper error:', error);
+    console.error('API endpoint error:', error);
+    console.error(error.stack);
     return res.status(500).json({ 
-      error: error.message || 'Failed to scrape Amazon data' 
+      error: error.message || 'Failed to process request',
+      stack: error.stack
     });
   }
 });
