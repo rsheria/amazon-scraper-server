@@ -784,18 +784,70 @@ app.post('/api/scrape', async (req, res) => {
 
 // Health check endpoint
 app.get('/health', (req, res) => {
-  res.json({ status: 'ok' });
+  res.json({ status: 'OK' });
 });
 
 // Root endpoint
 app.get('/', (req, res) => {
-  res.json({ 
-    message: 'Book Scraper API is running',
-    endpoints: {
-      health: '/health',
-      scraper: '/api/scrape'
+  res.send('Thalia Scraper API is running. Send POST request to /api/scrape with a URL in the body.');
+});
+
+// Add an alias endpoint for compatibility
+app.post('/api/scrape-thalia', async (req, res) => {
+  try {
+    console.log('Received scrape-thalia request:', req.body);
+    
+    const { url } = req.body;
+    
+    if (!url) {
+      console.error('No URL provided in request');
+      return res.status(400).json({ 
+        success: false, 
+        error: 'No URL provided' 
+      });
     }
-  });
+
+    console.log(`Scraping URL: ${url}`);
+
+    try {
+      // Validate URL
+      if (!isValidThaliaUrl(url)) {
+        console.error('Invalid Thalia URL:', url);
+        return res.status(400).json({ 
+          success: false, 
+          error: 'Invalid Thalia URL' 
+        });
+      }
+
+      // Scrape Thalia book data
+      const bookData = await scrapeThalia(url);
+      
+      // Log successful response
+      console.log('Successfully scraped data:', JSON.stringify(bookData).substring(0, 200) + '...');
+      
+      // Return success response
+      return res.json({ 
+        success: true, 
+        bookData 
+      });
+    } catch (error) {
+      console.error('Error during scraping:', error.message);
+      
+      // Return error response
+      return res.status(500).json({ 
+        success: false, 
+        error: error.message || 'An error occurred during scraping' 
+      });
+    }
+  } catch (error) {
+    console.error('Unexpected server error:', error);
+    
+    // Return error response for unexpected errors
+    return res.status(500).json({ 
+      success: false, 
+      error: 'Unexpected server error' 
+    });
+  }
 });
 
 // Start the server
