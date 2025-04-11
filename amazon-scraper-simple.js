@@ -402,257 +402,182 @@ function extractAuthorFromText(text) {
  * Scrape book data from Thalia URL
  */
 async function scrapeThalia(url) {
-  console.log(`Scraping data from: ${url}`);
+  console.log(`Starting to scrape Thalia book data from: ${url}`);
   
-  // Launch browser
+  // Launch browser with appropriate options for production environment
   const browser = await puppeteer.launch({
     headless: 'new',
     args: [
       '--no-sandbox',
       '--disable-setuid-sandbox',
-      '--disable-infobars',
-      '--window-position=0,0',
-      '--ignore-certificate-errors',
-      '--ignore-certificate-errors-spki-list'
+      '--disable-dev-shm-usage',
+      '--disable-accelerated-2d-canvas',
+      '--no-first-run',
+      '--no-zygote',
+      '--disable-gpu'
     ]
   });
-
+  
   try {
-    // Create new page
     const page = await browser.newPage();
     
-    // Set user agent
-    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/99.0.4844.84 Safari/537.36');
+    // Set user agent to appear as a regular browser
+    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
     
-    // Set viewport
-    await page.setViewport({
-      width: 1366,
-      height: 768
-    });
-
-    // Navigate to URL
-    console.log('Navigating to URL...');
-    await page.goto(url, { waitUntil: 'networkidle2', timeout: 30000 });
+    // Increase timeout
+    await page.setDefaultNavigationTimeout(60000);
+    
+    // Set a standard viewport
+    await page.setViewport({ width: 1280, height: 800 });
+    
+    console.log('Navigating to Thalia URL...');
+    await page.goto(url, { waitUntil: 'networkidle2' });
     
     // Handle cookie consent if present
+    console.log('Checking for cookie consent...');
     try {
-      console.log('Checking for cookie consent dialog...');
-      await handleCookieConsent(page);
+      const consentButtonSelector = 'button[data-testid="uc-accept-all-button"]';
+      const consentExists = await page.$(consentButtonSelector);
+      
+      if (consentExists) {
+        console.log('Cookie consent dialog found, accepting...');
+        await page.click(consentButtonSelector);
+        await page.waitForTimeout(1000);
+      }
     } catch (error) {
-      console.log('Error handling cookie consent:', error.message);
+      console.log('No cookie consent found or error handling it:', error.message);
     }
     
-    // Wait for content to load
-    await page.waitForSelector('h1', { timeout: 30000 });
+    // Wait for main content to load
+    await page.waitForSelector('body', { timeout: 10000 });
     
-    // Scroll down to load more content
-    await autoScroll(page);
+    // Take a screenshot for debugging
+    await page.screenshot({ path: 'thalia-debug.png' });
     
-    // Extract structured data if available
-    let structuredData = null;
-    try {
-      structuredData = await page.evaluate(() => {
-        const scripts = Array.from(document.querySelectorAll('script[type="application/ld+json"]'));
-        for (const script of scripts) {
-          try {
-            const data = JSON.parse(script.textContent);
-            if (data["@type"] === "Book" || data["@type"] === "Product") {
-              return data;
-            }
-          } catch (e) {
-            // Ignore parsing errors
-          }
-        }
-        return null;
-      });
-      if (structuredData) console.log('Structured data found');
-    } catch (error) {
-      console.log('Error extracting structured data:', error.message);
-    }
+    // Get the page HTML
+    const html = await page.content();
     
-    // Get the HTML content
-    const content = await page.content();
+    // Parse the HTML with cheerio
+    const $ = cheerio.load(html);
     
-    // Parse with Cheerio
-    const $ = cheerio.load(content);
-    
-    // Initialize book data object
-    const bookData = {
+    // Create a new book data object with all the fields we need
+    let bookData = {
       title: '',
       subtitle: '',
       author: '',
-      series: '',
-      seriesNumber: '',
       description: '',
-      format: '',
+      coverUrl: '',
       price: '',
+      language: 'Deutsch',
+      languageCode: 'de',
       isbn: '',
       ean: '',
       publisher: '',
       publicationDate: '',
-      language: '',
       pageCount: '',
-      coverUrl: '',
-      genre: 'Fiction', // Default genre
-      type: 'ebook', // Default type
+      categories: []
     };
-
-    // Extract title
-    const title = $('h1').first().text().trim();
-    if (title) {
-      // Check if title contains series information
-      const titleParts = title.split('|');
-      if (titleParts.length > 1) {
-        bookData.title = titleParts[0].trim();
-        bookData.subtitle = titleParts[1].trim();
-      } else {
-        bookData.title = title;
-      }
-    }
-
-    // Extract author
-    const authorSelectors = [
-      'a[href*="/person/"]',
-      'a[href*="/search?filterPERSON="]',
-      '.author-name',
-      'span[itemprop="author"]',
-      'div.author'
-    ];
     
-    for (const selector of authorSelectors) {
-      const authorElement = $(selector).first();
-      if (authorElement.length && authorElement.text().trim()) {
-        bookData.author = authorElement.text().trim();
-        break;
+    // Debug: Log some page elements to see what we're working with
+    console.log('Page title:', $('title').text());
+    
+    // Extract the book title - try multiple possible selectors
+    bookData.title = $('.styled__Title-sc-1l9uxq3-2, h1[data-testid="product-detail-headline"], h1.styled__TextElement-sc-d9k1bl-0, .c-bookTitle, .Typo-sc-1uo4pzl-0').first().text().trim();
+    
+    // Extract the book subtitle
+    bookData.subtitle = $('.styled__Subtitle-sc-1l9uxq3-3, .styled__SubtitleWrapper-sc-d9k1bl-1, .c-bookSubtitle').first().text().trim();
+    
+    // Extract author(s)
+    $('.product-author, .c-book__author, .elementLink, a[data-testid="authorLink"], [data-testid="product-authorLinks"] a, .contribAnchor, .styled__Link-sc-12h77p5-0').each(function() {
+      const authorName = $(this).text().trim();
+      if (authorName && !bookData.author.includes(authorName)) {
+        if (bookData.author) bookData.author += ', ';
+        bookData.author += authorName;
       }
-    }
-
-    // Extract series information
-    const seriesButton = $('button').filter(function() {
-      return $(this).text().includes('Ein Fall für') || 
-             $(this).text().includes('Band');
     });
     
-    if (seriesButton.length) {
-      const seriesText = seriesButton.text().trim();
-      bookData.series = seriesText.replace(/Band \d+/, '').trim();
-      
-      // Extract series number
-      const bandMatch = seriesText.match(/Band (\d+)/);
-      if (bandMatch) {
-        bookData.seriesNumber = bandMatch[1];
-      }
-    }
-
-    // Extract price
-    const priceElement = $('.price-display').first();
-    if (priceElement.length) {
-      bookData.price = priceElement.text().trim();
-    } else {
-      // Try alternative price selectors
-      const priceText = $('div').filter(function() {
-        return $(this).text().includes('€') && $(this).text().includes('inkl. MwSt');
-      }).first().text().trim();
-      
-      if (priceText) {
-        const priceMatch = priceText.match(/(\d+,\d+)\s*€/);
-        if (priceMatch) {
-          bookData.price = priceMatch[1] + ' €';
-        }
-      }
-    }
-
-    // Extract cover image URL
-    const coverImg = $('img[src*="/cover/"]');
-    if (coverImg.length) {
-      bookData.coverUrl = coverImg.attr('src');
-    }
-
     // Extract description
-    const descriptionHeading = $('h2').filter(function() {
-      return $(this).text().trim() === 'Beschreibung';
-    });
+    bookData.description = $('.text--html, .product-description-text, [data-testid="detailsTab"] .html4-styling, .c-book__description').text().trim();
     
-    if (descriptionHeading.length) {
-      // Get all text after the heading until the next heading
-      let description = '';
-      let nextElement = descriptionHeading.next();
-      
-      while (nextElement.length && !nextElement.is('h2')) {
-        if (nextElement.text().trim()) {
-          description += nextElement.text().trim() + '\n';
-        }
-        nextElement = nextElement.next();
-      }
-      
-      bookData.description = description.trim();
+    // Extract cover image
+    const coverImage = $('img.product-image, img.styled__Img-sc-j91dh-0, .c-bookCover img, [data-testid="product-detail-image"]');
+    if (coverImage.length) {
+      bookData.coverUrl = coverImage.attr('src') || '';
     }
-
-    // Extract details
-    const detailsHeading = $('h2').filter(function() {
-      return $(this).text().trim() === 'Details';
-    });
     
-    if (detailsHeading.length) {
-      let currentElement = detailsHeading.next();
-      let currentHeading = '';
+    if (!bookData.coverUrl) {
+      bookData.coverUrl = 'https://via.placeholder.com/150x225?text=No+Cover';
+    }
+    
+    // Extract price
+    bookData.price = $('.c-bookPrice, .styled__PriceWrapper-sc-1md0cja-4, [data-testid="product-price"]').text().trim();
+    
+    // Extract other metadata
+    $('.product-details-list li, .c-bookDetails li, .product-attributes tr, .styled__SpecTitle-sc-1md0cja-7').each(function() {
+      let label = $(this).find('.label, .key, span:first-child').text().trim().toLowerCase() || $(this).text().trim().toLowerCase();
+      let value = $(this).find('.value, .val, span:last-child').text().trim() || $(this).next().text().trim();
       
-      while (currentElement.length && !currentElement.is('h2')) {
-        if (currentElement.is('h3')) {
-          currentHeading = currentElement.text().trim();
-        } else if (currentHeading && currentElement.text().trim()) {
-          const value = currentElement.text().trim();
-          
-          switch (currentHeading) {
-            case 'Format':
-              bookData.format = value;
-              // Adjust type based on format
-              if (value.toLowerCase().includes('audio') || 
-                  value.toLowerCase().includes('mp3')) {
-                bookData.type = 'audiobook';
-              }
-              break;
-            case 'Verlag':
-              bookData.publisher = value;
-              break;
-            case 'Erscheinungsdatum':
-              bookData.publicationDate = value;
-              break;
-            case 'Seitenzahl':
-              bookData.pageCount = value;
-              break;
-            case 'Sprache':
-              bookData.language = value;
-              break;
-            case 'EAN':
-            case 'ISBN':
-              bookData.ean = value;
-              bookData.isbn = value;
-              break;
-          }
-        }
+      if (label.includes('isbn') || value.match(/^(\d{10}|\d{13})$/)) {
+        bookData.isbn = value.replace(/[^0-9]/g, '');
+      } else if (label.includes('ean')) {
+        bookData.ean = value.replace(/[^0-9]/g, '');
+      } else if (label.includes('verlag') || label.includes('publisher')) {
+        bookData.publisher = value;
+      } else if (label.includes('erscheinungsdatum') || label.includes('erschienen')) {
+        bookData.publicationDate = value;
+      } else if (label.includes('seiten') || label.includes('seitenzahl')) {
+        bookData.pageCount = value.replace(/[^0-9]/g, '');
+      } else if (label.includes('sprache')) {
+        bookData.language = value;
         
-        currentElement = currentElement.next();
+        // Set language code
+        if (value.toLowerCase().includes('deutsch')) {
+          bookData.languageCode = 'de';
+        } else if (value.toLowerCase().includes('english') || value.toLowerCase().includes('englisch')) {
+          bookData.languageCode = 'en';
+        }
       }
-    }
-
-    // Extract author from description if not found elsewhere
-    if (!bookData.author && bookData.description) {
-      // Look for common author patterns in the description
-      const authorFromDesc = extractAuthorFromText(bookData.description);
-      if (authorFromDesc) {
-        bookData.author = authorFromDesc;
+    });
+    
+    // Extract categories and genres
+    $('.breadcrumb-item, .breadcrumb a, .c-breadcrumb__item').each(function() {
+      const category = $(this).text().trim();
+      if (category && !['Home', 'Start', 'Thalia', ''].includes(category)) {
+        bookData.categories.push(category);
       }
+    });
+    
+    // Set a default genre if we have categories
+    if (bookData.categories.length > 0 && bookData.categories[bookData.categories.length - 1]) {
+      bookData.genre = bookData.categories[bookData.categories.length - 1];
+    } else {
+      bookData.genre = 'Fiction';  // Default genre
     }
-
-    // Normalize data
-    return normalizeBookData(bookData);
+    
+    // Set a default book type
+    bookData.type = 'ebook';  // Default to ebook
+    if (bookData.title.toLowerCase().includes('hörbuch') || bookData.description.toLowerCase().includes('hörbuch')) {
+      bookData.type = 'audiobook';
+    }
+    
+    // Validate required fields
+    const requiredFields = ['title', 'author', 'description'];
+    const missingFields = requiredFields.filter(field => !bookData[field]);
+    
+    if (missingFields.length > 0) {
+      bookData.validationWarning = {
+        missingFields: missingFields
+      };
+      console.warn('Warning: Missing required fields:', missingFields);
+    }
+    
+    console.log('Final extracted book data:', bookData);
+    return bookData;
   } catch (error) {
-    console.error('Error during scraping:', error);
+    console.error('Error scraping Thalia book:', error);
     throw error;
   } finally {
     await browser.close();
-    console.log('Browser closed');
   }
 }
 
