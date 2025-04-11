@@ -8,8 +8,10 @@ const bodyParser = require('body-parser');
 const cors = require('cors');
 const axios = require('axios');
 const cheerio = require('cheerio');
-const puppeteer = require('puppeteer');
 const path = require('path');
+
+// Import the Thalia scraper module
+const { scrapeThaliaSafe, isValidThaliaUrl } = require('./thalia-scraper');
 
 const app = express();
 const PORT = process.env.PORT || 3333;
@@ -136,448 +138,143 @@ async function fetchBookDataFromAmazon(url) {
       
       // Amazon blocking detection
       if (response.data && response.data.includes('Robot Check')) {
-        console.log('Amazon robot check detected, using fallback method');
+        console.warn('Amazon robot check detected, using alternative scraping method...');
         throw new Error('Amazon robot check detected');
       }
       
+      // Load HTML into cheerio
       const $ = cheerio.load(response.data);
       
-      // Extract title
-      bookData.title = $('#productTitle').text().trim();
-      if (!bookData.title) {
-        bookData.title = $('.kindle-title').text().trim();
+      // Extract book title
+      const title = $('#productTitle').text().trim();
+      if (title) {
+        bookData.title = title;
       }
       
-      // Extract author
-      $('#bylineInfo .author a, .contributorNameID, .authorNameLink a').each((i, el) => {
+      // Extract book author
+      const authorElement = $('.contributorNameID, .author a, a.contributorNameID');
+      authorElement.each((i, el) => {
         const author = $(el).text().trim();
         if (author && !bookData.authors.includes(author)) {
           bookData.authors.push(author);
         }
       });
-
-      // Extract cover image URL
-      const imgElement = $('#imgBlkFront, #ebooksImgBlkFront, #main-image');
-      if (imgElement.length) {
-        bookData.coverUrl = imgElement.attr('data-a-dynamic-image') || imgElement.attr('src');
-        // Extract the first URL from the data-a-dynamic-image JSON if it exists
-        if (bookData.coverUrl && bookData.coverUrl.startsWith('{')) {
-          try {
-            const imageData = JSON.parse(bookData.coverUrl);
-            bookData.coverUrl = Object.keys(imageData)[0] || '';
-          } catch (error) {
-            bookData.coverUrl = imgElement.attr('src') || '';
+      
+      // Extract book description
+      const description = $('#bookDescription_feature_div .a-expander-content').text().trim() 
+                        || $('#productDescription p').text().trim() 
+                        || $('#bookDescription_feature_div noscript').text().trim();
+      if (description) {
+        bookData.description = description;
+      }
+      
+      // Extract book cover URL
+      const coverUrl = $('#imgBlkFront').attr('src') || $('#landingImage').attr('src');
+      if (coverUrl) {
+        bookData.coverUrl = coverUrl;
+      }
+      
+      // Extract book details
+      const detailsElements = $('#detailBullets_feature_div li, .detail-bullet-list li');
+      detailsElements.each((i, el) => {
+        const text = $(el).text().trim();
+        
+        // Extract ISBN
+        if (text.includes('ISBN-10') || text.includes('ISBN-10:')) {
+          const match = text.match(/(\d{10})/);
+          if (match) bookData.isbn = match[1];
+        }
+        
+        // Extract ISBN-13
+        if (text.includes('ISBN-13') || text.includes('ISBN-13:')) {
+          const match = text.match(/(\d{13})/);
+          if (match) bookData.isbn13 = match[1];
+        }
+        
+        // Extract page count
+        if (text.includes('Seitenzahl') || text.includes('pages') || text.includes('Seiten')) {
+          const match = text.match(/(\d+)/);
+          if (match) bookData.pageCount = parseInt(match[1]);
+        }
+        
+        // Extract publisher
+        if (text.includes('Verlag') || text.includes('Publisher')) {
+          // The format is typically "Publisher: Name (Date)"
+          const publisherMatch = text.match(/Herausgeber\s*:\s*([^(]+)/) 
+                              || text.match(/Verlag\s*:\s*([^(]+)/) 
+                              || text.match(/Publisher\s*:\s*([^(]+)/);
+          if (publisherMatch) {
+            bookData.publisher = publisherMatch[1].trim();
+          }
+          
+          // Extract publication date
+          const dateMatch = text.match(/\(([^)]+)\)/);
+          if (dateMatch) {
+            bookData.publicationDate = dateMatch[1].trim();
           }
         }
-      }
-
-      // Fallback for cover image (try the smaller image)
-      if (!bookData.coverUrl) {
-        const smallImg = $('#landingImage, #ebooksImgBlkFront, #ebooks-img-canvas img').first();
-        bookData.coverUrl = smallImg.attr('src') || '';
-      }
-
-      // Extract description
-      const descriptionSelector = '#bookDescription_feature_div .a-expander-content, #bookDescription_feature_div noscript, #productDescription .content';
-      bookData.description = $(descriptionSelector).text().trim();
-      if (!bookData.description) {
-        bookData.description = $('[data-feature-name="bookDescription"] noscript').text().trim();
-      }
-
-      // Clean up description by removing HTML tags
-      bookData.description = bookData.description.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
-
-      // Extract book details
-      $('.detail-bullet-list li').each((i, el) => {
-        const text = $(el).text().trim();
-        if (text.includes('ISBN-10')) {
-          bookData.isbn = text.split(':')[1].trim();
-        } else if (text.includes('ISBN-13')) {
-          bookData.isbn13 = text.split(':')[1].trim();
-        } else if (text.includes('Publisher') || text.includes('Herausgeber')) {
-          bookData.publisher = text.split(':')[1].trim();
-        } else if (text.includes('Publication date') || text.includes('Erscheinungstermin')) {
-          bookData.publicationDate = text.split(':')[1].trim();
-        } else if (text.includes('Language') || text.includes('Sprache')) {
-          bookData.language = text.split(':')[1].trim();
-        } else if (text.includes('Print length') || text.includes('Seitenzahl')) {
-          const pageMatch = text.match(/\d+/);
-          if (pageMatch) {
-            bookData.pageCount = pageMatch[0];
+        
+        // Extract language
+        if (text.includes('Sprache') || text.includes('Language')) {
+          if (text.includes('Deutsch') || text.includes('German')) {
+            bookData.language = 'Deutsch';
+          } else if (text.includes('Englisch') || text.includes('English')) {
+            bookData.language = 'English';
+          } else {
+            const langMatch = text.match(/Sprache\s*:\s*([^;]+)/) || text.match(/Language\s*:\s*([^;]+)/);
+            if (langMatch) {
+              bookData.language = langMatch[1].trim();
+            }
           }
         }
       });
-
+      
       // Extract categories
-      $('#wayfinding-breadcrumbs_feature_div .a-link-normal').each((i, el) => {
+      const breadcrumbs = $('#wayfinding-breadcrumbs_feature_div li');
+      breadcrumbs.each((i, el) => {
         const category = $(el).text().trim();
-        if (category && !bookData.categories.includes(category)) {
+        if (category && !category.includes('›')) {
           bookData.categories.push(category);
         }
       });
-
-      // Determine if audiobook or ebook
-      if (url.includes('/audible/') || $('.audibleProductTitle').length > 0) {
-        bookData.type = 'audiobook';
-      } else {
-        bookData.type = 'ebook';
-      }
-
-    } catch (directScrapingError) {
-      console.log(`Direct scraping failed: ${directScrapingError.message}`);
-      // Fallback method: Try to get minimal book data from ASIN
       
-      // Fall back to title and author from the URL or ASIN
-      const urlParts = url.split('/');
-      const possibleTitle = urlParts.filter(part => part.length > 5 && !part.includes('amazon') && !part.includes('dp')).pop();
-      if (possibleTitle) {
-        bookData.title = possibleTitle.replace(/-/g, ' ').trim();
-      }
-    }
-    
-    // If we couldn't get anything, use generic data
-    if (!bookData.title || bookData.title === 'Unknown Title') {
-      bookData.title = `Book with ASIN: ${asin}`;
-    }
-    
-    if (bookData.authors.length === 0) {
-      bookData.authors.push('Unknown Author');
-    }
-    
-    // If we couldn't get a cover, use a placeholder
-    if (!bookData.coverUrl) {
-      bookData.coverUrl = `https://m.media-amazon.com/images/I/${asin}.jpg`;
-    }
-
-    // Return the book data for API response
-    return {
-      title: bookData.title,
-      author: bookData.authors.join(', ') || 'Unknown Author',
-      description: bookData.description || 'No description available',
-      cover_url: bookData.coverUrl,
-      language: bookData.language || 'German',
-      genre: bookData.categories.join(', ') || 'Fiction',
-      type: bookData.type || 'ebook',
-      isbn: bookData.isbn13 || bookData.isbn || '',
-      asin: bookData.asin,
-      page_count: bookData.pageCount ? parseInt(bookData.pageCount, 10) : null,
-      publication_date: bookData.publicationDate || '',
-      publisher: bookData.publisher || ''
-    };
-  } catch (error) {
-    console.error(`Error fetching book data: ${error.message}`);
-    console.error(error.stack);
-    
-    // Return emergency fallback data
-    return {
-      title: `Book with ASIN: ${asin}`,
-      author: 'Unknown Author',
-      description: 'Could not retrieve book description due to Amazon restrictions',
-      cover_url: `https://m.media-amazon.com/images/I/${asin}.jpg`,
-      language: 'German',
-      genre: '',
-      type: 'ebook',
-      isbn: '',
-      asin: asin,
-      page_count: null,
-      publication_date: '',
-      publisher: ''
-    };
-  }
-}
-
-/**
- * Validates if the provided URL is a valid Thalia.de book URL
- */
-function isValidThaliaUrl(url) {
-  try {
-    const urlObj = new URL(url);
-    return (
-      urlObj.hostname.includes('thalia.de') &&
-      (urlObj.pathname.includes('/artikeldetails/') || 
-       urlObj.pathname.includes('/shop/home/artikeldetails/'))
-    );
-  } catch (error) {
-    return false;
-  }
-}
-
-/**
- * Handle cookie consent dialog
- */
-async function handleCookieConsent(page) {
-  // Try different selectors for the accept button
-  const acceptButtonSelectors = [
-    'button[data-testid="uc-accept-all-button"]',
-    'button.consent-accept-all',
-    'button.privacy-accept-all',
-    'button[id*="accept"]',
-    'button[title*="akzeptieren"]',
-    'button[title*="Akzeptieren"]'
-  ];
-  
-  for (const selector of acceptButtonSelectors) {
-    try {
-      const button = await page.$(selector);
-      if (button) {
-        await button.click();
-        await page.waitForTimeout(1000);
-        return;
-      }
-    } catch (e) {
-      // Continue trying other selectors
-    }
-  }
-  
-  // Try to find button by text content
-  try {
-    await page.evaluate(() => {
-      const buttons = Array.from(document.querySelectorAll('button'));
-      const acceptButton = buttons.find(button => 
-        button.textContent.includes('Alles akzeptieren') || 
-        button.textContent.includes('Alle akzeptieren') ||
-        button.textContent.includes('Akzeptieren')
-      );
-      if (acceptButton) acceptButton.click();
-    });
-    
-    // Wait a moment for any dialog to close
-    await page.waitForTimeout(1000);
-  } catch (e) {
-    // Ignore errors
-  }
-}
-
-/**
- * Auto-scroll page to load all content
- */
-async function autoScroll(page) {
-  await page.evaluate(async () => {
-    await new Promise((resolve) => {
-      let totalHeight = 0;
-      const distance = 100;
-      const timer = setInterval(() => {
-        const scrollHeight = document.body.scrollHeight;
-        window.scrollBy(0, distance);
-        totalHeight += distance;
-        
-        if (totalHeight >= scrollHeight) {
-          clearInterval(timer);
-          resolve();
-        }
-      }, 100);
-    });
-  });
-  
-  // Scroll back to top
-  await page.evaluate(() => {
-    window.scrollTo(0, 0);
-  });
-}
-
-/**
- * Extract author from text
- */
-function extractAuthorFromText(text) {
-  // Common patterns for author attribution in German
-  const patterns = [
-    /von\s+([A-Z][a-zäöüß]+(?: [A-Z][a-zäöüß]+){1,3})/i,
-    /by\s+([A-Z][a-zäöüß]+(?: [A-Z][a-zäöüß]+){1,3})/i,
-    /autor[:\s]+([A-Z][a-zäöüß]+(?: [A-Z][a-zäöüß]+){1,3})/i,
-    /author[:\s]+([A-Z][a-zäöüß]+(?: [A-Z][a-zäöüß]+){1,3})/i,
-    /bestseller-autor\s+([A-Z][a-zäöüß]+(?: [A-Z][a-zäöüß]+){1,3})/i
-  ];
-  
-  for (const pattern of patterns) {
-    const match = text.match(pattern);
-    if (match && match[1]) {
-      return match[1].trim();
-    }
-  }
-  
-  return '';
-}
-
-/**
- * Scrape book data from Thalia URL
- */
-async function scrapeThalia(url) {
-  console.log(`Starting to scrape Thalia book data from: ${url}`);
-  
-  // Launch browser with appropriate options for production environment
-  const browser = await puppeteer.launch({
-    headless: 'new',
-    args: [
-      '--no-sandbox',
-      '--disable-setuid-sandbox',
-      '--disable-dev-shm-usage',
-      '--disable-accelerated-2d-canvas',
-      '--no-first-run',
-      '--no-zygote',
-      '--disable-gpu'
-    ]
-  });
-  
-  try {
-    const page = await browser.newPage();
-    
-    // Set user agent to appear as a regular browser
-    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
-    
-    // Increase timeout
-    await page.setDefaultNavigationTimeout(60000);
-    
-    // Set a standard viewport
-    await page.setViewport({ width: 1280, height: 800 });
-    
-    console.log('Navigating to Thalia URL...');
-    await page.goto(url, { waitUntil: 'networkidle2' });
-    
-    // Handle cookie consent if present
-    console.log('Checking for cookie consent...');
-    try {
-      const consentButtonSelector = 'button[data-testid="uc-accept-all-button"]';
-      const consentExists = await page.$(consentButtonSelector);
-      
-      if (consentExists) {
-        console.log('Cookie consent dialog found, accepting...');
-        await page.click(consentButtonSelector);
-        await page.waitForTimeout(1000);
-      }
+      console.log('Successfully extracted book data from Amazon page');
     } catch (error) {
-      console.log('No cookie consent found or error handling it:', error.message);
+      console.warn('Error during direct scraping, data may be incomplete:', error.message);
     }
     
-    // Wait for main content to load
-    await page.waitForSelector('body', { timeout: 10000 });
-    
-    // Take a screenshot for debugging
-    await page.screenshot({ path: 'thalia-debug.png' });
-    
-    // Get the page HTML
-    const html = await page.content();
-    
-    // Parse the HTML with cheerio
-    const $ = cheerio.load(html);
-    
-    // Create a new book data object with all the fields we need
-    let bookData = {
-      title: '',
-      subtitle: '',
-      author: '',
-      description: '',
-      coverUrl: '',
-      price: '',
-      language: 'Deutsch',
-      languageCode: 'de',
-      isbn: '',
-      ean: '',
-      publisher: '',
-      publicationDate: '',
-      pageCount: '',
-      categories: []
-    };
-    
-    // Debug: Log some page elements to see what we're working with
-    console.log('Page title:', $('title').text());
-    
-    // Extract the book title - try multiple possible selectors
-    bookData.title = $('.styled__Title-sc-1l9uxq3-2, h1[data-testid="product-detail-headline"], h1.styled__TextElement-sc-d9k1bl-0, .c-bookTitle, .Typo-sc-1uo4pzl-0').first().text().trim();
-    
-    // Extract the book subtitle
-    bookData.subtitle = $('.styled__Subtitle-sc-1l9uxq3-3, .styled__SubtitleWrapper-sc-d9k1bl-1, .c-bookSubtitle').first().text().trim();
-    
-    // Extract author(s)
-    $('.product-author, .c-book__author, .elementLink, a[data-testid="authorLink"], [data-testid="product-authorLinks"] a, .contribAnchor, .styled__Link-sc-12h77p5-0').each(function() {
-      const authorName = $(this).text().trim();
-      if (authorName && !bookData.author.includes(authorName)) {
-        if (bookData.author) bookData.author += ', ';
-        bookData.author += authorName;
-      }
-    });
-    
-    // Extract description
-    bookData.description = $('.text--html, .product-description-text, [data-testid="detailsTab"] .html4-styling, .c-book__description').text().trim();
-    
-    // Extract cover image
-    const coverImage = $('img.product-image, img.styled__Img-sc-j91dh-0, .c-bookCover img, [data-testid="product-detail-image"]');
-    if (coverImage.length) {
-      bookData.coverUrl = coverImage.attr('src') || '';
-    }
-    
-    if (!bookData.coverUrl) {
-      bookData.coverUrl = 'https://via.placeholder.com/150x225?text=No+Cover';
-    }
-    
-    // Extract price
-    bookData.price = $('.c-bookPrice, .styled__PriceWrapper-sc-1md0cja-4, [data-testid="product-price"]').text().trim();
-    
-    // Extract other metadata
-    $('.product-details-list li, .c-bookDetails li, .product-attributes tr, .styled__SpecTitle-sc-1md0cja-7').each(function() {
-      let label = $(this).find('.label, .key, span:first-child').text().trim().toLowerCase() || $(this).text().trim().toLowerCase();
-      let value = $(this).find('.value, .val, span:last-child').text().trim() || $(this).next().text().trim();
+    // If we still don't have most of the data, try fallback methods
+    if (!bookData.title || bookData.title === 'Unknown Title' || !bookData.authors.length) {
+      console.log('Direct scraping provided incomplete data, trying fallback methods...');
       
-      if (label.includes('isbn') || value.match(/^(\d{10}|\d{13})$/)) {
-        bookData.isbn = value.replace(/[^0-9]/g, '');
-      } else if (label.includes('ean')) {
-        bookData.ean = value.replace(/[^0-9]/g, '');
-      } else if (label.includes('verlag') || label.includes('publisher')) {
-        bookData.publisher = value;
-      } else if (label.includes('erscheinungsdatum') || label.includes('erschienen')) {
-        bookData.publicationDate = value;
-      } else if (label.includes('seiten') || label.includes('seitenzahl')) {
-        bookData.pageCount = value.replace(/[^0-9]/g, '');
-      } else if (label.includes('sprache')) {
-        bookData.language = value;
+      try {
+        // Simulate using Google Books API or other sources to get book data
+        // In a real application, this would use authenticated APIs or a proxy service
+        const bookDataFromFallback = {
+          title: 'Book title not available due to Amazon restrictions',
+          authors: ['Author information not available'],
+          description: 'Book description not available due to Amazon restrictions. Please check the book directly on Amazon.',
+          coverUrl: `https://via.placeholder.com/150x225?text=ASIN:${asin}`,
+          language: 'Deutsch',
+          pageCount: null,
+          publicationDate: '',
+          publisher: '',
+        };
         
-        // Set language code
-        if (value.toLowerCase().includes('deutsch')) {
-          bookData.languageCode = 'de';
-        } else if (value.toLowerCase().includes('english') || value.toLowerCase().includes('englisch')) {
-          bookData.languageCode = 'en';
-        }
+        // Update the book data with fallback data if it's missing
+        if (bookData.title === 'Unknown Title') bookData.title = bookDataFromFallback.title;
+        if (!bookData.authors.length) bookData.authors = bookDataFromFallback.authors;
+        if (bookData.description === 'No description available') bookData.description = bookDataFromFallback.description;
+        if (!bookData.coverUrl) bookData.coverUrl = bookDataFromFallback.coverUrl;
+      } catch (fallbackError) {
+        console.error('Fallback method failed:', fallbackError.message);
       }
-    });
-    
-    // Extract categories and genres
-    $('.breadcrumb-item, .breadcrumb a, .c-breadcrumb__item').each(function() {
-      const category = $(this).text().trim();
-      if (category && !['Home', 'Start', 'Thalia', ''].includes(category)) {
-        bookData.categories.push(category);
-      }
-    });
-    
-    // Set a default genre if we have categories
-    if (bookData.categories.length > 0 && bookData.categories[bookData.categories.length - 1]) {
-      bookData.genre = bookData.categories[bookData.categories.length - 1];
-    } else {
-      bookData.genre = 'Fiction';  // Default genre
     }
     
-    // Set a default book type
-    bookData.type = 'ebook';  // Default to ebook
-    if (bookData.title.toLowerCase().includes('hörbuch') || bookData.description.toLowerCase().includes('hörbuch')) {
-      bookData.type = 'audiobook';
-    }
-    
-    // Validate required fields
-    const requiredFields = ['title', 'author', 'description'];
-    const missingFields = requiredFields.filter(field => !bookData[field]);
-    
-    if (missingFields.length > 0) {
-      bookData.validationWarning = {
-        missingFields: missingFields
-      };
-      console.warn('Warning: Missing required fields:', missingFields);
-    }
-    
-    console.log('Final extracted book data:', bookData);
-    return bookData;
+    return normalizeBookData(bookData);
   } catch (error) {
-    console.error('Error scraping Thalia book:', error);
+    console.error('Error fetching book data:', error.message);
     throw error;
-  } finally {
-    await browser.close();
   }
 }
 
@@ -586,48 +283,26 @@ async function scrapeThalia(url) {
  */
 function normalizeBookData(bookData) {
   const normalized = { ...bookData };
-
-  // Normalize price
-  if (normalized.price) {
-    // Ensure price has € symbol
-    if (!normalized.price.includes('€')) {
-      normalized.price = `${normalized.price} €`;
-    }
-    // Extract numeric price value
-    const priceMatch = normalized.price.match(/(\d+[,.]\d+)/);
-    if (priceMatch) {
-      normalized.priceValue = parseFloat(priceMatch[1].replace(',', '.'));
-    }
+  
+  // Convert authors array to string
+  if (Array.isArray(normalized.authors) && normalized.authors.length > 0) {
+    normalized.author = normalized.authors.join(', ');
+    delete normalized.authors;
+  } else if (Array.isArray(normalized.authors) && normalized.authors.length === 0) {
+    normalized.author = 'Unknown Author';
+    delete normalized.authors;
   }
-
-  // Normalize publication date
-  if (normalized.publicationDate) {
-    try {
-      // Try to parse German date format (DD.MM.YYYY)
-      const dateMatch = normalized.publicationDate.match(/(\d{1,2})\.(\d{1,2})\.(\d{4})/);
-      if (dateMatch) {
-        const [_, day, month, year] = dateMatch;
-        normalized.publicationDateISO = `${year}-${month.padStart(2, '0')}-${day.padStart(2, '0')}`;
-      }
-    } catch (error) {
-      // Keep original if parsing fails
-    }
+  
+  // Ensure ISBN is a string
+  if (normalized.isbn && typeof normalized.isbn !== 'string') {
+    normalized.isbn = String(normalized.isbn);
   }
-
-  // Normalize page count
-  if (normalized.pageCount) {
-    const pageMatch = normalized.pageCount.match(/\d+/);
-    if (pageMatch) {
-      normalized.pageCountValue = parseInt(pageMatch[0], 10);
-    }
-  }
-
-  // Ensure language is standardized
+  
+  // Set language code
   if (normalized.language) {
-    const langLower = normalized.language.toLowerCase();
-    if (langLower.includes('deutsch')) {
+    if (normalized.language.includes('Deutsch') || normalized.language === 'German') {
       normalized.languageCode = 'de';
-    } else if (langLower.includes('english') || langLower.includes('englisch')) {
+    } else if (normalized.language.includes('English') || normalized.language === 'English') {
       normalized.languageCode = 'en';
     }
   } else {
@@ -662,7 +337,7 @@ app.post('/api/scrape', async (req, res) => {
     console.log(`Scraping URL: ${url}`);
 
     try {
-      // Validate URL (imported from thaliaScraperUtils)
+      // Validate URL
       if (!isValidAmazonUrl(url) && !isValidThaliaUrl(url)) {
         console.error('Invalid URL:', url);
         return res.status(400).json({ 
@@ -676,7 +351,14 @@ app.post('/api/scrape', async (req, res) => {
       if (isValidAmazonUrl(url)) {
         bookData = await fetchBookDataFromAmazon(url);
       } else if (isValidThaliaUrl(url)) {
-        bookData = await scrapeThalia(url);
+        // Use the improved Thalia scraper from the module
+        bookData = await scrapeThaliaSafe(url, {
+          maxRetries: 3,
+          validateData: true,
+          normalizeData: true,
+          fixData: true,
+          debug: true
+        });
       }
       
       // Log successful response
@@ -714,10 +396,10 @@ app.get('/health', (req, res) => {
 
 // Root endpoint
 app.get('/', (req, res) => {
-  res.send('Thalia Scraper API is running. Send POST request to /api/scrape with a URL in the body.');
+  res.send('Book Scraper API is running. Send POST request to /api/scrape-thalia with a Thalia URL or /api/scrape with any supported book URL.');
 });
 
-// Add an alias endpoint for compatibility
+// Thalia-specific endpoint for direct access
 app.post('/api/scrape-thalia', async (req, res) => {
   try {
     console.log('Received scrape-thalia request:', req.body);
@@ -732,7 +414,7 @@ app.post('/api/scrape-thalia', async (req, res) => {
       });
     }
 
-    console.log(`Scraping URL: ${url}`);
+    console.log(`Scraping Thalia URL: ${url}`);
 
     try {
       // Validate URL
@@ -744,11 +426,17 @@ app.post('/api/scrape-thalia', async (req, res) => {
         });
       }
 
-      // Scrape Thalia book data
-      const bookData = await scrapeThalia(url);
+      // Use the improved Thalia scraper from the module
+      const bookData = await scrapeThaliaSafe(url, {
+        maxRetries: 3,
+        validateData: true,
+        normalizeData: true,
+        fixData: true,
+        debug: true
+      });
       
       // Log successful response
-      console.log('Successfully scraped data:', JSON.stringify(bookData).substring(0, 200) + '...');
+      console.log('Successfully scraped Thalia data:', JSON.stringify(bookData).substring(0, 200) + '...');
       
       // Return success response
       return res.json({ 
@@ -756,7 +444,7 @@ app.post('/api/scrape-thalia', async (req, res) => {
         bookData 
       });
     } catch (error) {
-      console.error('Error during scraping:', error.message);
+      console.error('Error during Thalia scraping:', error.message);
       
       // Return error response
       return res.status(500).json({ 
@@ -784,6 +472,5 @@ app.listen(PORT, () => {
 module.exports = {
   isValidAmazonUrl,
   fetchBookDataFromAmazon,
-  isValidThaliaUrl,
-  scrapeThalia
+  isValidThaliaUrl
 };

@@ -1,5 +1,5 @@
 /**
- * Thalia.de Book Scraper - Server Implementation
+ * Thalia.de Book Scraper - Final Version
  * 
  * A comprehensive scraper for extracting book data from Thalia.de
  * with robust error handling and multiple extraction methods
@@ -849,16 +849,6 @@ app.post('/api/scrape-thalia', async (req, res) => {
       errorCode: error.code || 'SCRAPER_ERROR'
     });
   }
-});
-
-// Root endpoint for testing
-app.get('/', (req, res) => {
-  res.send('Thalia Scraper API is running. Send POST request to /api/scrape-thalia with a URL in the body.');
-});
-
-// Start server
-app.listen(PORT, () => {
-  console.log(`Thalia Scraper server is running on port ${PORT}`);
 });
 
 // Export functions for use in other parts of the app
