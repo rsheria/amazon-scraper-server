@@ -7,17 +7,14 @@ const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
 const cheerio = require('cheerio');
+const puppeteer = require('puppeteer');
 const path = require('path');
 
 const app = express();
 const PORT = process.env.PORT || 3333;
 
-// Enable CORS for all routes
-app.use(cors({
-  origin: '*',
-  methods: ['GET', 'POST'],
-  credentials: false
-}));
+// Middleware
+app.use(cors());
 app.use(express.json());
 
 // Serve static files from the public directory
@@ -275,6 +272,439 @@ async function fetchBookDataFromAmazon(url) {
   }
 }
 
+/**
+ * Validates if the provided URL is a valid Thalia.de book URL
+ */
+function isValidThaliaUrl(url) {
+  try {
+    const urlObj = new URL(url);
+    return (
+      urlObj.hostname.includes('thalia.de') &&
+      (urlObj.pathname.includes('/artikeldetails/') || 
+       urlObj.pathname.includes('/shop/home/artikeldetails/'))
+    );
+  } catch (error) {
+    return false;
+  }
+}
+
+/**
+ * Handle cookie consent dialog
+ */
+async function handleCookieConsent(page) {
+  // Try different selectors for the accept button
+  const acceptButtonSelectors = [
+    'button[data-testid="uc-accept-all-button"]',
+    'button.consent-accept-all',
+    'button.privacy-accept-all',
+    'button[id*="accept"]',
+    'button[title*="akzeptieren"]',
+    'button[title*="Akzeptieren"]'
+  ];
+  
+  for (const selector of acceptButtonSelectors) {
+    try {
+      const button = await page.$(selector);
+      if (button) {
+        await button.click();
+        await page.waitForTimeout(1000);
+        return;
+      }
+    } catch (e) {
+      // Continue trying other selectors
+    }
+  }
+  
+  // Try to find button by text content
+  try {
+    await page.evaluate(() => {
+      const buttons = Array.from(document.querySelectorAll('button'));
+      const acceptButton = buttons.find(button => 
+        button.textContent.includes('Alles akzeptieren') || 
+        button.textContent.includes('Alle akzeptieren') ||
+        button.textContent.includes('Akzeptieren')
+      );
+      if (acceptButton) acceptButton.click();
+    });
+    
+    // Wait a moment for any dialog to close
+    await page.waitForTimeout(1000);
+  } catch (e) {
+    // Ignore errors
+  }
+}
+
+/**
+ * Auto-scroll page to load all content
+ */
+async function autoScroll(page) {
+  await page.evaluate(async () => {
+    await new Promise((resolve) => {
+      let totalHeight = 0;
+      const distance = 100;
+      const timer = setInterval(() => {
+        const scrollHeight = document.body.scrollHeight;
+        window.scrollBy(0, distance);
+        totalHeight += distance;
+        
+        if (totalHeight >= scrollHeight) {
+          clearInterval(timer);
+          resolve();
+        }
+      }, 100);
+    });
+  });
+  
+  // Scroll back to top
+  await page.evaluate(() => {
+    window.scrollTo(0, 0);
+  });
+}
+
+/**
+ * Extract author from text
+ */
+function extractAuthorFromText(text) {
+  // Common patterns for author attribution in German
+  const patterns = [
+    /von\s+([A-Z][a-zäöüß]+(?: [A-Z][a-zäöüß]+){1,3})/i,
+    /by\s+([A-Z][a-zäöüß]+(?: [A-Z][a-zäöüß]+){1,3})/i,
+    /autor[:\s]+([A-Z][a-zäöüß]+(?: [A-Z][a-zäöüß]+){1,3})/i,
+    /author[:\s]+([A-Z][a-zäöüß]+(?: [A-Z][a-zäöüß]+){1,3})/i,
+    /bestseller-autor\s+([A-Z][a-zäöüß]+(?: [A-Z][a-zäöüß]+){1,3})/i
+  ];
+  
+  for (const pattern of patterns) {
+    const match = text.match(pattern);
+    if (match && match[1]) {
+      return match[1].trim();
+    }
+  }
+  
+  return '';
+}
+
+/**
+ * Scrape book data from Thalia URL
+ */
+async function scrapeThalia(url) {
+  console.log(`Scraping data from: ${url}`);
+  
+  // Launch browser
+  const browser = await puppeteer.launch({
+    headless: 'new',
+    args: [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-infobars',
+      '--window-position=0,0',
+      '--ignore-certificate-errors',
+      '--ignore-certificate-errors-spki-list'
+    ]
+  });
+
+  try {
+    // Create new page
+    const page = await browser.newPage();
+    
+    // Set user agent
+    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/99.0.4844.84 Safari/537.36');
+    
+    // Set viewport
+    await page.setViewport({
+      width: 1366,
+      height: 768
+    });
+
+    // Navigate to URL
+    console.log('Navigating to URL...');
+    await page.goto(url, { waitUntil: 'networkidle2', timeout: 30000 });
+    
+    // Handle cookie consent if present
+    try {
+      console.log('Checking for cookie consent dialog...');
+      await handleCookieConsent(page);
+    } catch (error) {
+      console.log('Error handling cookie consent:', error.message);
+    }
+    
+    // Wait for content to load
+    await page.waitForSelector('h1', { timeout: 30000 });
+    
+    // Scroll down to load more content
+    await autoScroll(page);
+    
+    // Extract structured data if available
+    let structuredData = null;
+    try {
+      structuredData = await page.evaluate(() => {
+        const scripts = Array.from(document.querySelectorAll('script[type="application/ld+json"]'));
+        for (const script of scripts) {
+          try {
+            const data = JSON.parse(script.textContent);
+            if (data["@type"] === "Book" || data["@type"] === "Product") {
+              return data;
+            }
+          } catch (e) {
+            // Ignore parsing errors
+          }
+        }
+        return null;
+      });
+      if (structuredData) console.log('Structured data found');
+    } catch (error) {
+      console.log('Error extracting structured data:', error.message);
+    }
+    
+    // Get the HTML content
+    const content = await page.content();
+    
+    // Parse with Cheerio
+    const $ = cheerio.load(content);
+    
+    // Initialize book data object
+    const bookData = {
+      title: '',
+      subtitle: '',
+      author: '',
+      series: '',
+      seriesNumber: '',
+      description: '',
+      format: '',
+      price: '',
+      isbn: '',
+      ean: '',
+      publisher: '',
+      publicationDate: '',
+      language: '',
+      pageCount: '',
+      coverUrl: '',
+      genre: 'Fiction', // Default genre
+      type: 'ebook', // Default type
+    };
+
+    // Extract title
+    const title = $('h1').first().text().trim();
+    if (title) {
+      // Check if title contains series information
+      const titleParts = title.split('|');
+      if (titleParts.length > 1) {
+        bookData.title = titleParts[0].trim();
+        bookData.subtitle = titleParts[1].trim();
+      } else {
+        bookData.title = title;
+      }
+    }
+
+    // Extract author
+    const authorSelectors = [
+      'a[href*="/person/"]',
+      'a[href*="/search?filterPERSON="]',
+      '.author-name',
+      'span[itemprop="author"]',
+      'div.author'
+    ];
+    
+    for (const selector of authorSelectors) {
+      const authorElement = $(selector).first();
+      if (authorElement.length && authorElement.text().trim()) {
+        bookData.author = authorElement.text().trim();
+        break;
+      }
+    }
+
+    // Extract series information
+    const seriesButton = $('button').filter(function() {
+      return $(this).text().includes('Ein Fall für') || 
+             $(this).text().includes('Band');
+    });
+    
+    if (seriesButton.length) {
+      const seriesText = seriesButton.text().trim();
+      bookData.series = seriesText.replace(/Band \d+/, '').trim();
+      
+      // Extract series number
+      const bandMatch = seriesText.match(/Band (\d+)/);
+      if (bandMatch) {
+        bookData.seriesNumber = bandMatch[1];
+      }
+    }
+
+    // Extract price
+    const priceElement = $('.price-display').first();
+    if (priceElement.length) {
+      bookData.price = priceElement.text().trim();
+    } else {
+      // Try alternative price selectors
+      const priceText = $('div').filter(function() {
+        return $(this).text().includes('€') && $(this).text().includes('inkl. MwSt');
+      }).first().text().trim();
+      
+      if (priceText) {
+        const priceMatch = priceText.match(/(\d+,\d+)\s*€/);
+        if (priceMatch) {
+          bookData.price = priceMatch[1] + ' €';
+        }
+      }
+    }
+
+    // Extract cover image URL
+    const coverImg = $('img[src*="/cover/"]');
+    if (coverImg.length) {
+      bookData.coverUrl = coverImg.attr('src');
+    }
+
+    // Extract description
+    const descriptionHeading = $('h2').filter(function() {
+      return $(this).text().trim() === 'Beschreibung';
+    });
+    
+    if (descriptionHeading.length) {
+      // Get all text after the heading until the next heading
+      let description = '';
+      let nextElement = descriptionHeading.next();
+      
+      while (nextElement.length && !nextElement.is('h2')) {
+        if (nextElement.text().trim()) {
+          description += nextElement.text().trim() + '\n';
+        }
+        nextElement = nextElement.next();
+      }
+      
+      bookData.description = description.trim();
+    }
+
+    // Extract details
+    const detailsHeading = $('h2').filter(function() {
+      return $(this).text().trim() === 'Details';
+    });
+    
+    if (detailsHeading.length) {
+      let currentElement = detailsHeading.next();
+      let currentHeading = '';
+      
+      while (currentElement.length && !currentElement.is('h2')) {
+        if (currentElement.is('h3')) {
+          currentHeading = currentElement.text().trim();
+        } else if (currentHeading && currentElement.text().trim()) {
+          const value = currentElement.text().trim();
+          
+          switch (currentHeading) {
+            case 'Format':
+              bookData.format = value;
+              // Adjust type based on format
+              if (value.toLowerCase().includes('audio') || 
+                  value.toLowerCase().includes('mp3')) {
+                bookData.type = 'audiobook';
+              }
+              break;
+            case 'Verlag':
+              bookData.publisher = value;
+              break;
+            case 'Erscheinungsdatum':
+              bookData.publicationDate = value;
+              break;
+            case 'Seitenzahl':
+              bookData.pageCount = value;
+              break;
+            case 'Sprache':
+              bookData.language = value;
+              break;
+            case 'EAN':
+            case 'ISBN':
+              bookData.ean = value;
+              bookData.isbn = value;
+              break;
+          }
+        }
+        
+        currentElement = currentElement.next();
+      }
+    }
+
+    // Extract author from description if not found elsewhere
+    if (!bookData.author && bookData.description) {
+      // Look for common author patterns in the description
+      const authorFromDesc = extractAuthorFromText(bookData.description);
+      if (authorFromDesc) {
+        bookData.author = authorFromDesc;
+      }
+    }
+
+    // Normalize data
+    return normalizeBookData(bookData);
+  } catch (error) {
+    console.error('Error during scraping:', error);
+    throw error;
+  } finally {
+    await browser.close();
+    console.log('Browser closed');
+  }
+}
+
+/**
+ * Normalize book data for consistent format
+ */
+function normalizeBookData(bookData) {
+  const normalized = { ...bookData };
+
+  // Normalize price
+  if (normalized.price) {
+    // Ensure price has € symbol
+    if (!normalized.price.includes('€')) {
+      normalized.price = `${normalized.price} €`;
+    }
+    // Extract numeric price value
+    const priceMatch = normalized.price.match(/(\d+[,.]\d+)/);
+    if (priceMatch) {
+      normalized.priceValue = parseFloat(priceMatch[1].replace(',', '.'));
+    }
+  }
+
+  // Normalize publication date
+  if (normalized.publicationDate) {
+    try {
+      // Try to parse German date format (DD.MM.YYYY)
+      const dateMatch = normalized.publicationDate.match(/(\d{1,2})\.(\d{1,2})\.(\d{4})/);
+      if (dateMatch) {
+        const [_, day, month, year] = dateMatch;
+        normalized.publicationDateISO = `${year}-${month.padStart(2, '0')}-${day.padStart(2, '0')}`;
+      }
+    } catch (error) {
+      // Keep original if parsing fails
+    }
+  }
+
+  // Normalize page count
+  if (normalized.pageCount) {
+    const pageMatch = normalized.pageCount.match(/\d+/);
+    if (pageMatch) {
+      normalized.pageCountValue = parseInt(pageMatch[0], 10);
+    }
+  }
+
+  // Ensure language is standardized
+  if (normalized.language) {
+    const langLower = normalized.language.toLowerCase();
+    if (langLower.includes('deutsch')) {
+      normalized.languageCode = 'de';
+    } else if (langLower.includes('english') || langLower.includes('englisch')) {
+      normalized.languageCode = 'en';
+    }
+  } else {
+    // Default language for German bookstore
+    normalized.language = 'Deutsch';
+    normalized.languageCode = 'de';
+  }
+
+  // Fix empty cover URL with a placeholder
+  if (!normalized.coverUrl) {
+    normalized.coverUrl = 'https://via.placeholder.com/150x225?text=No+Cover';
+  }
+
+  return normalized;
+}
+
 // Create API endpoint for scraping
 app.post('/api/scrape', async (req, res) => {
   // Set JSON content type and CORS headers for all responses
@@ -291,31 +721,48 @@ app.post('/api/scrape', async (req, res) => {
       });
     }
     
-    if (!isValidAmazonUrl(url)) {
+    if (isValidAmazonUrl(url)) {
+      try {
+        const bookData = await fetchBookDataFromAmazon(url);
+        
+        return res.status(200).json({
+          success: true,
+          bookData: bookData
+        });
+      } catch (scrapeError) {
+        console.error(`Detailed scraper error: ${scrapeError.message}`);
+        console.error(scrapeError.stack);
+        
+        // Send a more informative error response
+        return res.status(500).json({ 
+          success: false,
+          error: `Failed to scrape Amazon data: ${scrapeError.message}`,
+          details: scrapeError.stack
+        });
+      }
+    } else if (isValidThaliaUrl(url)) {
+      try {
+        const bookData = await scrapeThalia(url);
+        
+        return res.status(200).json({
+          success: true,
+          bookData: bookData
+        });
+      } catch (scrapeError) {
+        console.error(`Detailed scraper error: ${scrapeError.message}`);
+        console.error(scrapeError.stack);
+        
+        // Send a more informative error response
+        return res.status(500).json({ 
+          success: false,
+          error: `Failed to scrape Thalia data: ${scrapeError.message}`,
+          details: scrapeError.stack
+        });
+      }
+    } else {
       return res.status(400).json({ 
         success: false,
-        error: 'Invalid Amazon URL' 
-      });
-    }
-    
-    console.log(`Scraping book data from ${url}`);
-    
-    try {
-      const bookData = await fetchBookDataFromAmazon(url);
-      
-      return res.status(200).json({
-        success: true,
-        bookData: bookData
-      });
-    } catch (scrapeError) {
-      console.error(`Detailed scraper error: ${scrapeError.message}`);
-      console.error(scrapeError.stack);
-      
-      // Send a more informative error response
-      return res.status(500).json({ 
-        success: false,
-        error: `Failed to scrape Amazon data: ${scrapeError.message}`,
-        details: scrapeError.stack
+        error: 'Invalid URL. Please provide a valid Amazon.de or Thalia.de book URL.' 
       });
     }
   } catch (error) {
@@ -338,7 +785,7 @@ app.get('/health', (req, res) => {
 // Root endpoint
 app.get('/', (req, res) => {
   res.json({ 
-    message: 'Amazon Scraper API is running - Simple Version',
+    message: 'Book Scraper API is running',
     endpoints: {
       health: '/health',
       scraper: '/api/scrape'
@@ -348,11 +795,13 @@ app.get('/', (req, res) => {
 
 // Start the server
 app.listen(PORT, () => {
-  console.log(`Amazon scraper server (simple version) running on port ${PORT}`);
+  console.log(`Book scraper server running on port ${PORT}`);
 });
 
 // Export functions for testing
 module.exports = {
   isValidAmazonUrl,
-  fetchBookDataFromAmazon
+  fetchBookDataFromAmazon,
+  isValidThaliaUrl,
+  scrapeThalia
 };
