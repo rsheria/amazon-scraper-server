@@ -41,7 +41,8 @@ async function scrapeThalia(url, options = {}) {
       '--disable-infobars',
       '--window-position=0,0',
       '--ignore-certificate-errors',
-      '--ignore-certificate-errors-spki-list'
+      '--ignore-certificate-errors-spki-list',
+      '--disable-features=IsolateOrigins,site-per-process' // This helps with cookie consent handling
     ]
   });
 
@@ -50,7 +51,7 @@ async function scrapeThalia(url, options = {}) {
     const page = await browser.newPage();
     
     // Set user agent
-    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/99.0.4844.84 Safari/537.36');
+    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
     
     // Set viewport
     await page.setViewport({
@@ -61,6 +62,47 @@ async function scrapeThalia(url, options = {}) {
     // Navigate to URL
     if (debug) console.log('Navigating to URL...');
     await page.goto(url, { waitUntil: 'networkidle2', timeout });
+    
+    // Take a screenshot for debugging the initial page load
+    if (debug) {
+      try {
+        await page.screenshot({ path: 'thalia-initial-page.png' });
+        console.log('Saved initial page screenshot');
+      } catch (err) {
+        console.log('Could not save initial page screenshot:', err.message);
+      }
+    }
+    
+    // Handle cookie consent if present
+    try {
+      if (debug) console.log('Checking for cookie consent dialog...');
+      await handleCookieConsent(page);
+      
+      // After handling cookie consent, wait for page to stabilize again
+      await page.waitForTimeout(2000);
+      await page.waitForSelector('h1', { timeout: 10000 }).catch(() => {
+        console.log('Could not find h1 tag after handling cookie consent');
+      });
+      
+      // Take another screenshot after handling cookies to confirm the page is properly loaded
+      if (debug) {
+        try {
+          await page.screenshot({ path: 'thalia-after-cookies.png' });
+          console.log('Saved post-cookie handling screenshot');
+        } catch (err) {
+          console.log('Could not save post-cookie handling screenshot:', err.message);
+        }
+      }
+      
+      // Refresh the page if content doesn't seem to be loaded correctly
+      const pageText = await page.evaluate(() => document.body.innerText);
+      if (!pageText.includes('Beschreibung') && !pageText.includes('Details')) {
+        console.log('Page content seems incomplete, refreshing page...');
+        await page.reload({ waitUntil: 'networkidle2', timeout });
+      }
+    } catch (error) {
+      if (debug) console.log('Error handling cookie consent:', error.message);
+    }
     
     // Check if we're on a valid book page
     const isBookPage = await page.evaluate(() => {
@@ -74,15 +116,14 @@ async function scrapeThalia(url, options = {}) {
     });
     
     if (!isBookPage) {
+      try {
+        // Take a screenshot of the non-book page for debugging
+        await page.screenshot({ path: 'thalia-not-book-page.png' });
+        console.log('Saved non-book page screenshot for debugging');
+      } catch (err) {
+        console.log('Could not save non-book page screenshot:', err.message);
+      }
       throw new Error('URL does not appear to be a valid Thalia book page');
-    }
-    
-    // Handle cookie consent if present
-    try {
-      if (debug) console.log('Checking for cookie consent dialog...');
-      await handleCookieConsent(page);
-    } catch (error) {
-      if (debug) console.log('Error handling cookie consent:', error.message);
     }
     
     // Wait for content to load
@@ -254,6 +295,7 @@ async function autoScroll(page) {
 async function handleCookieConsent(page) {
   // Try different selectors for the accept button
   const acceptButtonSelectors = [
+    'button.sc-dcJsrY:nth-child(2)', // New selector provided by user
     'button[data-testid="uc-accept-all-button"]',
     'button.consent-accept-all',
     'button.privacy-accept-all',
@@ -262,35 +304,60 @@ async function handleCookieConsent(page) {
     'button[title*="Akzeptieren"]'
   ];
   
+  // Take a screenshot for debugging cookie consent issues
+  try {
+    await page.screenshot({ path: 'cookie-consent-debug.png' });
+    console.log('Saved cookie consent debug screenshot');
+  } catch (err) {
+    console.log('Could not save cookie consent debug screenshot:', err.message);
+  }
+
+  // Try each selector in order
   for (const selector of acceptButtonSelectors) {
     try {
+      console.log(`Trying to find cookie consent button with selector: ${selector}`);
+      
+      // Wait a short time for the button to be visible
+      await page.waitForSelector(selector, { timeout: 3000, visible: true })
+        .catch(() => console.log(`Selector ${selector} not found or not visible`));
+      
       const button = await page.$(selector);
       if (button) {
+        console.log(`Found cookie consent button with selector: ${selector}, clicking it`);
         await button.click();
-        await page.waitForTimeout(1000);
+        await page.waitForTimeout(2000); // Wait longer to ensure dialog closes
+        console.log('Cookie consent button clicked');
         return;
       }
     } catch (e) {
+      console.log(`Error with selector ${selector}:`, e.message);
       // Continue trying other selectors
     }
   }
   
   // Try to find button by text content
   try {
+    console.log('Trying to find cookie consent button by text content');
     await page.evaluate(() => {
       const buttons = Array.from(document.querySelectorAll('button'));
       const acceptButton = buttons.find(button => 
         button.textContent.includes('Alles akzeptieren') || 
         button.textContent.includes('Alle akzeptieren') ||
-        button.textContent.includes('Akzeptieren')
+        button.textContent.includes('Akzeptieren') ||
+        button.textContent.includes('Accept All') ||
+        button.textContent.includes('Accept all') ||
+        button.textContent.includes('Allow all')
       );
-      if (acceptButton) acceptButton.click();
+      if (acceptButton) {
+        console.log('Found button by text:', acceptButton.textContent);
+        acceptButton.click();
+      }
     });
     
     // Wait a moment for any dialog to close
-    await new Promise(resolve => setTimeout(resolve, 1000));
+    await page.waitForTimeout(2000);
   } catch (e) {
-    // Ignore errors
+    console.log('Error finding button by text:', e.message);
   }
 }
 
